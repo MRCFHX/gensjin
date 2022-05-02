@@ -6,6 +6,8 @@ import com.google.protobuf.ByteString;
 
 import emu.grasscutter.Config;
 import emu.grasscutter.Grasscutter;
+import emu.grasscutter.Grasscutter.ServerDebugMode;
+import emu.grasscutter.Grasscutter.ServerRunMode;
 import emu.grasscutter.database.DatabaseHelper;
 import emu.grasscutter.game.Account;
 import emu.grasscutter.net.proto.QueryCurrRegionHttpRspOuterClass.QueryCurrRegionHttpRsp;
@@ -16,6 +18,7 @@ import emu.grasscutter.server.dispatch.json.*;
 import emu.grasscutter.server.dispatch.json.ComboTokenReqJson.LoginTokenData;
 import emu.grasscutter.server.event.dispatch.QueryAllRegionsEvent;
 import emu.grasscutter.server.event.dispatch.QueryCurrentRegionEvent;
+import emu.grasscutter.server.http.gacha.GachaRecordHandler;
 import emu.grasscutter.utils.FileUtils;
 import express.Express;
 import org.eclipse.jetty.server.Connector;
@@ -35,11 +38,11 @@ public final class DispatchServer {
 	private final String defaultServerName = "os_usa";
 
 	public String regionListBase64;
-	public HashMap<String, RegionData> regions;
+	public Map<String, RegionData> regions;
 	private Express httpServer;
 
 	public DispatchServer() {
-		this.regions = new HashMap<String, RegionData>();
+		this.regions = new HashMap<>();
 		this.gson = new GsonBuilder().create();
 
 		this.loadQueries();
@@ -50,13 +53,19 @@ public final class DispatchServer {
 		return httpServer;
 	}
 
+	public void setHttpServer(Express httpServer) {
+		this.httpServer.stop();
+		this.httpServer = httpServer;
+		this.httpServer.listen(Grasscutter.getConfig().getDispatchOptions().Port);
+	}
+
 	public Gson getGsonFactory() {
 		return gson;
 	}
 
 	public QueryCurrRegionHttpRsp getCurrRegion() {
 		// Needs to be fixed by having the game servers connect to the dispatch server.
-		if (Grasscutter.getConfig().RunMode.equalsIgnoreCase("HYBRID")) {
+		if (Grasscutter.getConfig().RunMode == ServerRunMode.HYBRID) {
 			return regions.get(defaultServerName).parsedRegionQuery;
 		}
 
@@ -92,7 +101,7 @@ public final class DispatchServer {
 
 			List<RegionSimpleInfo> servers = new ArrayList<>();
 			List<String> usedNames = new ArrayList<>(); // List to check for potential naming conflicts
-			if (Grasscutter.getConfig().RunMode.equalsIgnoreCase("HYBRID")) { // Automatically add the game server if in
+			if (Grasscutter.getConfig().RunMode == ServerRunMode.HYBRID) { // Automatically add the game server if in
 																				// hybrid mode
 				RegionSimpleInfo server = RegionSimpleInfo.newBuilder()
 						.setName("os_usa")
@@ -227,7 +236,7 @@ public final class DispatchServer {
 			});
 
 			config.enforceSsl = Grasscutter.getConfig().getDispatchOptions().UseSSL;
-			if(Grasscutter.getConfig().DebugMode.equalsIgnoreCase("ALL")) {
+			if(Grasscutter.getConfig().DebugMode == ServerDebugMode.ALL) {
 				config.enableDevLogging();
 			}
 		});
@@ -235,7 +244,7 @@ public final class DispatchServer {
 		httpServer.get("/", (req, res) -> res.send("Welcome to Grasscutter"));
 
 		httpServer.raw().error(404, ctx -> {
-			if(Grasscutter.getConfig().DebugMode.equalsIgnoreCase("MISSING")) {
+			if(Grasscutter.getConfig().DebugMode == ServerDebugMode.MISSING) {
 				Grasscutter.getLogger().info(String.format("[Dispatch] Potential unhandled %s request: %s", ctx.method(), ctx.url()));
 			}
 			ctx.contentType("text/html");
@@ -271,12 +280,12 @@ public final class DispatchServer {
 		});
 
 		// Login
+
 		httpServer.post("/hk4e_global/mdk/shield/api/login", (req, res) -> {
 			// Get post data
 			LoginAccountRequestJson requestData = null;
 			try {
 				String body = req.ctx().body();
-				Grasscutter.getLogger().info(body);
 				requestData = getGsonFactory().fromJson(body, LoginAccountRequestJson.class);
 			} catch (Exception ignored) {
 			}
@@ -431,7 +440,8 @@ public final class DispatchServer {
 		// hk4e-sdk-os.hoyoverse.com
 		httpServer.get("/hk4e_global/mdk/agreement/api/getAgreementInfos", new DispatchHttpJsonHandler("{\"retcode\":0,\"message\":\"OK\",\"data\":{\"marketing_agreements\":[]}}"));
 		// hk4e-sdk-os.hoyoverse.com
-		httpServer.post("/hk4e_global/combo/granter/api/compareProtocolVersion", new DispatchHttpJsonHandler("{\"retcode\":0,\"message\":\"OK\",\"data\":{\"modified\":true,\"protocol\":{\"id\":0,\"app_id\":4,\"language\":\"en\",\"user_proto\":\"\",\"priv_proto\":\"\",\"major\":7,\"minimum\":0,\"create_time\":\"0\",\"teenager_proto\":\"\",\"third_proto\":\"\"}}}"));
+		// this could be either GET or POST based on the observation of different clients
+		httpServer.all("/hk4e_global/combo/granter/api/compareProtocolVersion", new DispatchHttpJsonHandler("{\"retcode\":0,\"message\":\"OK\",\"data\":{\"modified\":true,\"protocol\":{\"id\":0,\"app_id\":4,\"language\":\"en\",\"user_proto\":\"\",\"priv_proto\":\"\",\"major\":7,\"minimum\":0,\"create_time\":\"0\",\"teenager_proto\":\"\",\"third_proto\":\"\"}}}"));
 
 		// Game data
 		// hk4e-api-os.hoyoverse.com
@@ -469,11 +479,14 @@ public final class DispatchServer {
 
 		// Logging servers
 		// overseauspider.yuanshen.com
-		httpServer.all("/log", new DispatchHttpJsonHandler("{\"code\":0}"));
+		httpServer.all("/log", new ClientLogHandler());
 		// log-upload-os.mihoyo.com
-		httpServer.all("/crash/dataUpload", new DispatchHttpJsonHandler("{\"code\":0}"));
+		httpServer.all("/crash/dataUpload", new ClientLogHandler());
 
-		httpServer.get("/gacha", (req, res) -> res.send("<!doctype html><html lang=\"en\"><head><title>Gacha</title></head><body></body></html>"));
+		// webstatic-sea.hoyoverse.com
+		httpServer.get("/admin/mi18n/plat_oversea/m202003048/m202003048-version.json", new DispatchHttpJsonHandler("{\"version\":51}"));
+
+		httpServer.get("/gacha", new GachaRecordHandler());
 
 		httpServer.listen(Grasscutter.getConfig().getDispatchOptions().Port);
 		Grasscutter.getLogger().info("[Dispatch] Dispatch server started on port " + httpServer.raw().port());
@@ -517,6 +530,14 @@ public final class DispatchServer {
 		public RegionData(QueryCurrRegionHttpRsp prq, String b64) {
 			this.parsedRegionQuery = prq;
 			this.Base64 = b64;
+		}
+
+		public QueryCurrRegionHttpRsp getParsedRegionQuery() {
+			return parsedRegionQuery;
+		}
+
+		public String getBase64() {
+			return Base64;
 		}
 	}
 }
